@@ -6,11 +6,12 @@ boundary is someone else's release cadence. This keeps that boundary inside
 code you own. The generic MCP client comes later, for servers where third-party
 code is the actual point.
 
-Credentials are plain environment variables (`GOOGLE_CLIENT_ID`,
+Credentials are three encrypted values (`GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_TOKEN_JSON`) in `.env`, not a client-secrets
-JSON file or a separate token file — one place to look, one file to protect.
-The token is the one value here that legitimately changes at runtime: it's
-rewritten in place via `set_env_value` after each refresh.
+JSON file or a separate token file — one place to look, one file to protect;
+see `brain.config` for the encryption. The token is the one value here that
+legitimately changes at runtime: it's re-encrypted and rewritten in place via
+`set_env_value` after each refresh.
 
 **Scope is `calendar.events`** — the narrowest scope Google offers that still
 permits writes. It cannot read Drive, read Gmail, change calendar sharing, or

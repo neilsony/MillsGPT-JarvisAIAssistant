@@ -1,9 +1,9 @@
 """One-time Google Calendar authorization.
 
 Run once, interactively. It opens a browser, you consent, and it writes
-`GOOGLE_TOKEN_JSON` straight into your `.env` — no separate token file, no
-client-secrets JSON on disk. The bot re-reads it (and rewrites it in place
-after each refresh) from there onward.
+`GOOGLE_TOKEN_JSON` straight into your `.env`, encrypted — no separate token
+file, no client-secrets JSON on disk. The bot re-reads it (and re-encrypts it
+in place after each refresh) from there onward.
 
     python -m brain.authorize_google
 
@@ -27,7 +27,10 @@ def main() -> int:
             f"GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET aren't set in {settings.env_file}.\n\n"
             f"In Google Cloud Console: create a project, enable the Google Calendar API,\n"
             f"then create an OAuth client ID of type 'Desktop app'. Open the downloaded\n"
-            f"JSON and copy its client_id and client_secret into your .env. See SETUP.md.",
+            f"JSON and add its client_id and client_secret to your .env, encrypted:\n\n"
+            f"  npx @dotenvx/dotenvx set GOOGLE_CLIENT_ID\n"
+            f"  npx @dotenvx/dotenvx set GOOGLE_CLIENT_SECRET\n\n"
+            f"Each one prompts for the value. See SETUP.md.",
             file=sys.stderr,
         )
         return 1

@@ -14,7 +14,21 @@
       "Bash(vim .env)",
       "Bash(nano .env)",
       "Bash(open .env)",
-      "Bash(pbcopy < .env)"
+      "Bash(pbcopy < .env)",
+      "Read(.env.keys)",
+      "Read(./.env.keys)",
+      "Read(**/.env.keys)",
+      "Bash(cat .env.keys)",
+      "Bash(cat ./.env.keys)",
+      "Bash(less .env.keys)",
+      "Bash(more .env.keys)",
+      "Bash(head .env.keys)",
+      "Bash(tail .env.keys)",
+      "Bash(grep .env.keys)",
+      "Bash(vim .env.keys)",
+      "Bash(nano .env.keys)",
+      "Bash(open .env.keys)",
+      "Bash(pbcopy < .env.keys)"
     ]
   }
 }

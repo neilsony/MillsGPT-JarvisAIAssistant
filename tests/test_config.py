@@ -1,18 +1,56 @@
-"""Tests for .env parsing and settings resolution.
+"""Tests for .env parsing, encryption, and settings resolution.
 
 A secrets file that silently drops a key produces a confusing 401 three layers
-away, so malformed lines are loud and the real environment always wins.
+away, so malformed lines are loud and the real environment always wins. And
+once the file is encrypted, nothing here may put plaintext back on disk.
 """
 
 import pytest
 
 from brain.config import (
     Settings,
-    is_encrypted_env_file,
+    _secret_store_command,
+    decrypt_value,
+    encrypt_value,
+    find_private_key,
     load_env_file,
     parse_env,
     set_env_value,
 )
+
+# A throwaway keypair and a value sealed to it by the real dotenvx CLI (2.30.0),
+# so these tests prove compatibility with dotenvx itself rather than just this
+# module agreeing with itself. The key opens nothing but the string below.
+FIXTURE_PUBLIC_KEY = "0395e4f1b71fd4875daf88197705b7d91612c8a85c37931689578078f4012c5b69"
+FIXTURE_PRIVATE_KEY = "b5e6a4a6fc11163b52928f97a96b9403de1b06d25d5a2605893e28ccfc747367"
+FIXTURE_CIPHERTEXT = (
+    "encrypted:BAaW3zCF6PJGBgsVq3595cr6UXTHeiSXjAkBwSpJrFkX3xVF6+D261ivO4phS9m2k2q/8BvunNx3XO9gYK"
+    "Qg4dEu+Z4GdH6Q5s9IuyvyB6WSXLq1g6YRG1JX9EMNWGynY7BAK1oTyEZQNxyFv0PBFjkHgA=="
+)
+FIXTURE_PLAINTEXT = "fixture-secret ✓"
+# A valid secp256k1 private key that isn't the fixture's, for the wrong-key cases.
+OTHER_PRIVATE_KEY = "1" * 64
+
+
+@pytest.fixture(autouse=True)
+def isolated_key_sources(monkeypatch):
+    """Keep every test away from this machine's real private keys.
+
+    Otherwise the OS secret store would be queried for real, and an exported
+    DOTENV_PRIVATE_KEY would quietly win over the fixture's.
+    """
+    monkeypatch.setattr("brain.config._secret_store_lookup", lambda public_key: None)
+    monkeypatch.delenv("DOTENV_PRIVATE_KEY", raising=False)
+
+
+def encrypted_env(tmp_path, body="", *, keys_file=True):
+    """An `.env` set up for encryption with the fixture keypair, laid out the
+    way dotenvx writes it, plus (by default) its `.env.keys`."""
+    path = tmp_path / ".env"
+    path.write_text(f'DOTENV_PUBLIC_KEY="{FIXTURE_PUBLIC_KEY}"\n\n# .env\n{body}')
+    if keys_file:
+        (tmp_path / ".env.keys").write_text(f"# .env\nDOTENV_PRIVATE_KEY={FIXTURE_PRIVATE_KEY}\n")
+    return path
 
 
 class TestParseEnv:
@@ -123,40 +161,172 @@ class TestSetEnvValue:
             set_env_value(tmp_path / ".env", "KEY", "it's broken")
 
 
-class TestEncryptedEnv:
-    """dotenvx encrypts values in place; `dotenvx run --` injects the real ones
-    into the environment, where they outrank the file. The danger is running
-    *without* dotenvx, where ciphertext would be read as the secret itself."""
+class TestSetEnvValueEncrypted:
+    """A refreshed OAuth token goes to disk as ciphertext, never plaintext."""
 
-    def test_detects_an_encrypted_file(self, tmp_path):
-        p = tmp_path / ".env"
-        p.write_text('#DOTENV_PUBLIC_KEY="03abc"\nFOO="encrypted:BX9s"\n')
-        assert is_encrypted_env_file(p)
+    def test_encrypts_before_writing(self, tmp_path):
+        p = encrypted_env(tmp_path)
+        token = '{"access_token": "abc", "refresh_token": "xyz"}'
+        set_env_value(p, "SPOTIFY_TOKEN_JSON", token)
+        assert "access_token" not in p.read_text()
+        assert decrypt_value(load_env_file(p)["SPOTIFY_TOKEN_JSON"], FIXTURE_PRIVATE_KEY) == token
 
-    def test_plain_file_is_not_encrypted(self, tmp_path):
-        p = tmp_path / ".env"
-        p.write_text("FOO=bar\n")
-        assert not is_encrypted_env_file(p)
+    def test_replaces_an_encrypted_value_in_place(self, tmp_path):
+        p = encrypted_env(tmp_path, f"A=1\nGOOGLE_TOKEN_JSON='{FIXTURE_CIPHERTEXT}'\nB=2\n")
+        set_env_value(p, "GOOGLE_TOKEN_JSON", "refreshed")
+        got = load_env_file(p)
+        assert list(got) == ["DOTENV_PUBLIC_KEY", "A", "GOOGLE_TOKEN_JSON", "B"]
+        assert decrypt_value(got["GOOGLE_TOKEN_JSON"], FIXTURE_PRIVATE_KEY) == "refreshed"
 
-    def test_missing_file_is_not_encrypted(self, tmp_path):
-        assert not is_encrypted_env_file(tmp_path / "nope")
+    def test_an_apostrophe_is_fine_once_encrypted(self, tmp_path):
+        # Ciphertext is base64, so the single-quoting limit no longer applies.
+        p = encrypted_env(tmp_path)
+        set_env_value(p, "KEY", "it's fine")
+        assert decrypt_value(load_env_file(p)["KEY"], FIXTURE_PRIVATE_KEY) == "it's fine"
 
-    def test_ciphertext_from_file_raises_instead_of_being_used(self, tmp_path, monkeypatch):
-        # The whole point: a nonsense key must fail loudly here, not as a
-        # confusing 401 from OpenRouter three layers down.
-        p = tmp_path / ".env"
-        p.write_text('#DOTENV_PUBLIC_KEY="03abc"\nOPENROUTER_API_KEY="encrypted:BX9sQ2"\n')
+    def test_a_refreshed_token_reads_back_through_settings(self, tmp_path, monkeypatch):
+        # The real cycle: the token refreshes, the Brain restarts and loads it.
+        monkeypatch.delenv("SPOTIFY_TOKEN_JSON", raising=False)
+        p = encrypted_env(tmp_path)
+        set_env_value(p, "SPOTIFY_TOKEN_JSON", '{"access_token": "new"}')
+        assert Settings.load(env_file=p).spotify_token_json == '{"access_token": "new"}'
+
+
+class TestEncryption:
+    def test_decrypts_a_value_encrypted_by_dotenvx(self):
+        assert decrypt_value(FIXTURE_CIPHERTEXT, FIXTURE_PRIVATE_KEY) == FIXTURE_PLAINTEXT
+
+    def test_round_trip(self):
+        token = '{"access_token": "abc", "refresh_token": "xyz"}'
+        sealed = encrypt_value(token, FIXTURE_PUBLIC_KEY)
+        assert sealed.startswith("encrypted:")
+        assert "access_token" not in sealed
+        assert decrypt_value(sealed, FIXTURE_PRIVATE_KEY) == token
+
+    def test_the_same_value_never_encrypts_the_same_way_twice(self):
+        # A fresh ephemeral key per value: two equal secrets can't be spotted
+        # as equal by comparing their ciphertext.
+        assert encrypt_value("x", FIXTURE_PUBLIC_KEY) != encrypt_value("x", FIXTURE_PUBLIC_KEY)
+
+    def test_the_wrong_private_key_raises(self):
+        with pytest.raises(ValueError):
+            decrypt_value(FIXTURE_CIPHERTEXT, OTHER_PRIVATE_KEY)
+
+
+class TestFindPrivateKey:
+    def test_the_environment_comes_first(self, tmp_path, monkeypatch):
+        (tmp_path / ".env.keys").write_text("DOTENV_PRIVATE_KEY=from-file\n")
+        monkeypatch.setenv("DOTENV_PRIVATE_KEY", "from-env")
+        assert find_private_key(tmp_path / ".env", FIXTURE_PUBLIC_KEY) == "from-env"
+
+    def test_then_the_keys_file_beside_the_env_file(self, tmp_path):
+        (tmp_path / ".env.keys").write_text("# .env\nDOTENV_PRIVATE_KEY=from-file\n")
+        assert find_private_key(tmp_path / ".env", FIXTURE_PUBLIC_KEY) == "from-file"
+
+    def test_then_the_os_secret_store_by_public_key(self, tmp_path, monkeypatch):
+        asked = []
+
+        def lookup(public_key):
+            asked.append(public_key)
+            return "from-store"
+
+        monkeypatch.setattr("brain.config._secret_store_lookup", lookup)
+        assert find_private_key(tmp_path / ".env", FIXTURE_PUBLIC_KEY) == "from-store"
+        assert asked == [FIXTURE_PUBLIC_KEY]
+
+    def test_none_when_there_is_no_key_anywhere(self, tmp_path):
+        assert find_private_key(tmp_path / ".env", FIXTURE_PUBLIC_KEY) is None
+
+
+class TestSecretStoreCommand:
+    """Must match dotenvx's own lookup exactly, or a key it stored is invisible here."""
+
+    def test_macos_keychain(self):
+        assert _secret_store_command("03abc", "darwin") == [
+            "/usr/bin/security", "find-generic-password", "-s", "dotenvx", "-a", "03abc", "-w",
+        ]
+
+    def test_linux_secret_service(self):
+        assert _secret_store_command("03abc", "linux") == [
+            "secret-tool", "lookup", "service", "dotenvx", "public-key", "03abc",
+        ]
+
+    def test_no_store_elsewhere(self):
+        assert _secret_store_command("03abc", "win32") is None
+
+
+class TestEncryptedSettings:
+    def test_decrypts_in_process(self, tmp_path, monkeypatch):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        with pytest.raises(RuntimeError, match="dotenvx run"):
+        p = encrypted_env(tmp_path, f'OPENROUTER_API_KEY="{FIXTURE_CIPHERTEXT}"\n')
+        assert Settings.load(env_file=p).openrouter_api_key == FIXTURE_PLAINTEXT
+
+    def test_the_real_environment_still_wins(self, tmp_path, monkeypatch):
+        p = encrypted_env(tmp_path, f'OPENROUTER_API_KEY="{FIXTURE_CIPHERTEXT}"\n')
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-shell")
+        assert Settings.load(env_file=p).openrouter_api_key == "sk-from-shell"
+
+    def test_ciphertext_from_the_environment_is_opened_too(self, tmp_path, monkeypatch):
+        # `dotenvx run` without its key passes values through still sealed;
+        # that must never reach an API as if it were the key itself.
+        p = encrypted_env(tmp_path)
+        monkeypatch.setenv("OPENROUTER_API_KEY", FIXTURE_CIPHERTEXT)
+        assert Settings.load(env_file=p).openrouter_api_key == FIXTURE_PLAINTEXT
+
+    def test_no_private_key_raises_instead_of_using_ciphertext(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        p = encrypted_env(tmp_path, f'OPENROUTER_API_KEY="{FIXTURE_CIPHERTEXT}"\n', keys_file=False)
+        with pytest.raises(RuntimeError, match="no private key"):
             Settings.load(env_file=p)
 
-    def test_real_environment_still_wins_over_ciphertext(self, tmp_path, monkeypatch):
-        # This is how dotenvx actually works — it injects the decrypted value
-        # into the environment, which takes precedence over the file.
-        p = tmp_path / ".env"
-        p.write_text('#DOTENV_PUBLIC_KEY="03abc"\nOPENROUTER_API_KEY="encrypted:BX9sQ2"\n')
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-decrypted-real-value")
-        assert Settings.load(env_file=p).openrouter_api_key == "sk-decrypted-real-value"
+    def test_the_wrong_private_key_raises(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setenv("DOTENV_PRIVATE_KEY", OTHER_PRIVATE_KEY)
+        p = encrypted_env(tmp_path, f'OPENROUTER_API_KEY="{FIXTURE_CIPHERTEXT}"\n', keys_file=False)
+        with pytest.raises(RuntimeError, match="couldn't be decrypted"):
+            Settings.load(env_file=p)
+
+    def test_a_load_with_nothing_encrypted_never_looks_for_a_key(self, tmp_path, monkeypatch):
+        def lookup(public_key):
+            raise AssertionError("looked up a private key it didn't need")
+
+        monkeypatch.setattr("brain.config._secret_store_lookup", lookup)
+        monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+        p = encrypted_env(tmp_path, "OPENROUTER_MODEL=z-ai/glm-5.3\n", keys_file=False)
+        assert Settings.load(env_file=p).model == "z-ai/glm-5.3"
+
+
+class TestPlaintextGuard:
+    """Once .env is encrypted, a plaintext secret in it is a leak nobody would notice."""
+
+    def test_a_secret_pasted_in_by_hand_is_refused(self, tmp_path):
+        p = encrypted_env(tmp_path, "DEEPGRAM_API_KEY=dg-pasted-by-hand\n")
+        with pytest.raises(RuntimeError, match="DEEPGRAM_API_KEY"):
+            Settings.load(env_file=p)
+
+    def test_the_fix_it_offers_is_set_not_encrypt(self, tmp_path):
+        # `dotenvx encrypt` would cut an unquoted value at a bare '#';
+        # `dotenvx set` takes the value exactly as typed.
+        p = encrypted_env(tmp_path, "HF_TOKEN=hf_abc\n")
+        with pytest.raises(RuntimeError, match="dotenvx set HF_TOKEN"):
+            Settings.load(env_file=p)
+
+    def test_a_key_this_module_has_never_heard_of_counts_as_a_secret(self, tmp_path):
+        p = encrypted_env(tmp_path, "SOME_NEW_TOKEN=abc\n")
+        with pytest.raises(RuntimeError, match="SOME_NEW_TOKEN"):
+            Settings.load(env_file=p)
+
+    def test_plain_settings_are_allowed(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+        p = encrypted_env(
+            tmp_path, "OPENROUTER_MODEL=z-ai/glm-5.3\nSPOTIFY_DEVICE_NAME=Web Player\n"
+        )
+        assert Settings.load(env_file=p).model == "z-ai/glm-5.3"
+
+    def test_empty_values_are_not_secrets(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        p = encrypted_env(tmp_path, "HF_TOKEN=\n")
+        assert Settings.load(env_file=p).hf_token is None
 
 
 class TestSettings:

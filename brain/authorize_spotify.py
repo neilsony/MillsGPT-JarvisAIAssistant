@@ -1,8 +1,9 @@
 """One-time Spotify authorization.
 
 Run once, interactively. It opens a browser, you consent, and it writes
-`SPOTIFY_TOKEN_JSON` straight into your `.env` — no separate token file. The
-bot re-reads it (and rewrites it in place after each refresh) from there onward.
+`SPOTIFY_TOKEN_JSON` straight into your `.env`, encrypted — no separate token
+file. The bot re-reads it (and re-encrypts it in place after each refresh)
+from there onward.
 
     python -m brain.authorize_spotify            # the Web API token (controls playback)
     python -m brain.authorize_spotify --player   # the bot's own player (librespot)
@@ -43,8 +44,11 @@ def authorize_api(settings: Settings) -> int:
         print(
             f"SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET aren't set in {settings.env_file}.\n\n"
             f"At developer.spotify.com/dashboard: create an app, tick 'Web API', and add\n"
-            f"the redirect URI {REDIRECT_URI} exactly. Copy its Client ID and Client\n"
-            f"Secret into your .env. See SETUP.md.",
+            f"the redirect URI {REDIRECT_URI} exactly. Then add its Client ID and Client\n"
+            f"Secret to your .env, encrypted:\n\n"
+            f"  npx @dotenvx/dotenvx set SPOTIFY_CLIENT_ID\n"
+            f"  npx @dotenvx/dotenvx set SPOTIFY_CLIENT_SECRET\n\n"
+            f"Each one prompts for the value. See SETUP.md.",
             file=sys.stderr,
         )
         return 1

@@ -121,11 +121,11 @@ in, or you get an unhelpful 401 much later.
    - <https://huggingface.co/pyannote/embedding>
 
    All three. The first one silently depends on the other two.
-3. Put the token in `.env`:
+3. Put the token in `.env`, encrypted:
 
 ```bash
 cp .env.example .env
-# edit .env, set HF_TOKEN=hf_...
+npx @dotenvx/dotenvx set HF_TOKEN   # prompts for it; the first `set` also makes the keypair
 ```
 
 Check it landed:
@@ -315,17 +315,19 @@ a speaker, so Spotify has to be open on your Mac or phone.
 1. At <https://developer.spotify.com/dashboard>, create an app. Tick **Web API**,
    and add this redirect URI **exactly** (Spotify rejects `localhost`):
    `http://127.0.0.1:8888/callback`
-2. Copy the app's Client ID and Client Secret into `.env`:
+2. Add the app's Client ID and Client Secret to `.env`, encrypted:
 
 ```bash
-# edit .env, set SPOTIFY_CLIENT_ID=... and SPOTIFY_CLIENT_SECRET=...
-# optionally SPOTIFY_DEVICE_NAME=Web Player  (only to pick between several open devices)
+npx @dotenvx/dotenvx set SPOTIFY_CLIENT_ID       # each one prompts for the value
+npx @dotenvx/dotenvx set SPOTIFY_CLIENT_SECRET
+# optionally, in .env: SPOTIFY_DEVICE_NAME=Web Player  (not a secret, so plaintext
+# is fine; only to pick between several open devices)
 pip install -e '.[spotify]'
 python -m brain.authorize_spotify
 ```
 
 That opens a browser once. After you approve, it writes `SPOTIFY_TOKEN_JSON`
-into `.env`. The bot refreshes that token itself from then on. Without the
+into `.env`, encrypted. The bot refreshes that token itself from then on. Without the
 client ID and secret, the bot runs as before with no Spotify tools.
 
 3. **Give the bot its own speaker** (recommended). Without this, music goes to

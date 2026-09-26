@@ -45,7 +45,7 @@ The system is three independent subsystems with deliberately narrow interfaces:
   - `search_show` — semantic retrieval over the "Canon" store (transcribed, chunked, and embedded show corpus in SQLite + `sqlite-vec`).
   - `remember` / `recall` — persistent long-term memory, stored locally in SQLite.
   - `load_skill` — pulls the full text of a named skill file (markdown with frontmatter) only when a turn actually needs it. The agent's system prompt stays small; a spoken-reply bot cannot afford pages of procedure on every turn.
-  - `get_calendar_events`, `create_calendar_event`, `update_calendar_event` — native Google Calendar integration (Google's own client libraries, not an MCP server). OAuth credentials live as environment variables; the access token auto-refreshes and rewrites itself into `.env`.
+  - `get_calendar_events`, `create_calendar_event`, `update_calendar_event` — native Google Calendar integration (Google's own client libraries, not an MCP server). OAuth credentials live encrypted in `.env`; the access token auto-refreshes and re-encrypts itself in place.
   - `play_music`, `queue_track`, `pause_music`, `resume_music`, `skip_track` — Spotify playback control (optional; Premium required). Plays through the bot's own headless player, "DmillsGPT" (librespot, started with the Brain), or whatever device has Spotify open if that isn't set up. Playback only: no library or playlist edits.
   - `web_search` — live web grounding for anything the corpus can't answer.
 - **Strict, safe tool surface** — the agent has no filesystem access, no shell, no editing. Everything is read-mostly: search, remember, recall, calendar, music playback.
@@ -78,12 +78,12 @@ The hard problem this project solves: extract one person's voice from multi-spea
 
 | Component | Status |
 |---|---|
-| Agent (tools, memory, skills, calendar, web) | ✅ Live, 405 tests passing |
+| Agent (tools, memory, skills, calendar, web) | ✅ Live, 426 tests passing |
 | Voice loop (STT + TTS, push-to-talk) | ✅ Live |
 | Voiceprint dataset | ✅ 205 clips / 29.6 min / 6 sources (4 solo videos + 2 confirmed show episodes) |
 | TTS reference voice | ✅ `voices/dmills/reference.wav` (33 s clean turn) |
 | Canon store | ✅ 1,686 chunks ingested |
-| `.env` encryption (dotenvx) | ⏳ Guards in place; final encrypt step pending |
+| `.env` encryption (dotenvx) | ✅ Every credential encrypted at rest; decrypted in-process |
 
 ---
 
@@ -123,7 +123,7 @@ python -m pipeline fetch-reference <url>  # one arbitrary clip as reference audi
 python -m brain.cli                       # text mode — the dev loop for the agent
 python -m body.voice_loop                 # voice mode — push-to-talk, plus the web UI
 python -m body.voice_loop --no-ui         # voice mode, terminal only
-python -m brain.authorize_google          # one-time Google OAuth consent → token into .env
+python -m brain.authorize_google          # one-time Google OAuth consent → encrypted token into .env
 python -m brain.tts.chatterbox_client "text"
                                           # TTS smoke test via the daemon
 ```
@@ -131,7 +131,7 @@ python -m brain.tts.chatterbox_client "text"
 ### Quality gates
 
 ```bash
-pytest                                    # 405 tests
+pytest                                    # 426 tests
 mypy brain body pipeline                  # strict mode
 ruff check . && ruff format --check .
 ```
@@ -174,6 +174,7 @@ The client (`ChatterboxTTS` in `brain/tts/chatterbox_client.py`) connects to `/t
 | Package | Version | Role |
 |---|---|---|
 | pydantic | ≥ 2.9 | config/settings model |
+| eciespy | 0.4.6 | decrypts/encrypts dotenvx values in `.env`, in-process |
 | openai | 3.16.2 | OpenRouter client (OpenAI-compatible) |
 | fastapi / uvicorn | 0.141.1 / 0.53.0 | service layer |
 | sqlite-vec | 0.1.9 | vector search inside SQLite |
@@ -203,13 +204,14 @@ The client (`ChatterboxTTS` in `brain/tts/chatterbox_client.py`) connects to `/t
 ```bash
 brew install ffmpeg yt-dlp
 export DYLD_LIBRARY_PATH="$(brew --prefix ffmpeg)/lib"   # needed by some pipeline steps
+brew install node                         # for `npx @dotenvx/dotenvx`, to add or change secrets
 ```
 
 ---
 
 ## Configuration
 
-Everything lives in `.env` (gitignored; see `.env.example`). Real environment variables take precedence over file values — this ordering is also how dotenvx decryption works.
+Everything lives in `.env` (gitignored; see `.env.example`), encrypted with [dotenvx](https://dotenvx.com). Real environment variables take precedence over file values.
 
 | Variable | Required for | Notes |
 |---|---|---|
@@ -217,10 +219,16 @@ Everything lives in `.env` (gitignored; see `.env.example`). Real environment va
 | `OPENROUTER_API_KEY` | agent (`brain.cli`, voice loop) | pay-as-you-go |
 | `OPENROUTER_MODEL` | — | default `z-ai/glm-5.3-flash` |
 | `DEEPGRAM_API_KEY` | voice loop | not needed in text mode |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_TOKEN_JSON` | calendar tools | desktop OAuth client; token auto-refreshes into `.env` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_TOKEN_JSON` | calendar tools | desktop OAuth client; token auto-refreshes, re-encrypted, into `.env` |
 | `DATA_DIR` / `VOICES_DIR` / `PROFILE_DIR` | — | optional path overrides |
 
-`.env` supports dotenvx encryption: `brain/config.py` refuses to read ciphertext as a plaintext key and re-encrypts any key written back into an encrypted file.
+**Encryption.** Every credential in `.env` is dotenvx ciphertext. `brain/config.py` decrypts values in-process as it loads them — no `dotenvx run` wrapper — with the private key from `DOTENV_PRIVATE_KEY`, `.env.keys`, or the OS secret store (macOS Keychain), in that order. Refreshed OAuth tokens are encrypted before they're written back, and a plaintext secret found in an encrypted `.env` stops the load. To add or change a secret without it ever touching disk — or your shell history — in plaintext:
+
+```bash
+npx @dotenvx/dotenvx set DEEPGRAM_API_KEY   # prompts for the value
+```
+
+Back up the private key (a password manager is fine): without it, nothing in `.env` can be decrypted.
 
 ---
 
@@ -249,7 +257,7 @@ voices/
 
 ## Testing & code standards
 
-- **405 tests** (`pytest`), all passing — segment filtering, crosstalk rejection, speaker matching, persistence, tool schemas, prompt assembly, config parsing, and the agent loop are all covered without network access.
+- **426 tests** (`pytest`), all passing — segment filtering, crosstalk rejection, speaker matching, persistence, tool schemas, prompt assembly, config parsing, and the agent loop are all covered without network access.
 - **mypy strict mode** across all three packages, with targeted, documented exceptions for untyped third-party ML libraries.
 - **ruff** with `E, F, I, UP, B, SIM` at 100 columns.
 

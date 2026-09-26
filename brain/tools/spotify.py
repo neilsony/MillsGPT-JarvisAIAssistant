@@ -20,11 +20,11 @@ Otherwise the target is the active device, else the one named by
 `SPOTIFY_DEVICE_NAME` (an optional tiebreaker), else whichever open device
 Spotify lists first.
 
-Credentials are plain environment variables in `.env`, like Google's — one
-place to look, one file to protect. Unlike Calendar, the token can't just be
-refreshed once at startup: Spotify access tokens last an hour and the Brain
-runs for days. So spotipy refreshes on demand through a cache handler whose
-"cache" *is* `SPOTIFY_TOKEN_JSON`, rewritten in place via `set_env_value`.
+Credentials live in `.env`, encrypted like Calendar's (see `brain.config`).
+Unlike Calendar, the token can't just be refreshed once at startup: Spotify
+access tokens last an hour and the Brain runs for days. So spotipy refreshes
+on demand through a cache handler whose "cache" *is* `SPOTIFY_TOKEN_JSON`,
+re-encrypted and rewritten in place via `set_env_value`.
 
 Known limit: Spotify blocks new API apps from its own algorithmic playlists
 (Discover Weekly and friends). Neil's own playlists work; those may not.
@@ -73,7 +73,7 @@ DUCK_VOLUME_PERCENT = 20
 
 
 class EnvTokenStore:
-    """The Spotify token, held in memory and persisted to `.env`.
+    """The Spotify token, held in memory and persisted, encrypted, to `.env`.
 
     Plain class so it's testable without spotipy installed; `make_auth_manager`
     adapts it to spotipy's `CacheHandler` interface.
